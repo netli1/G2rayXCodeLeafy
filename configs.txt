@@ -1,3 +1,4 @@
 
 vless://f5ab41be-0fc4-4604-a3c3-e4e4a8b2b6fb@94.130.13.19:443?encryption=none&security=tls&sni=verbose-potato-6v999j66vxpvfww7-443.app.github.dev&fp=chrome&alpn=h2&insecure=1&allowInsecure=1&type=xhttp&host=verbose-potato-6v999j66vxpvfww7-443.app.github.dev&path=%2F&mode=packet-up#G2rayXCodeLeafy|hitchcockisdead
 vless://30ca0331-a42d-4c81-8458-480977b4fd35@20.90.66.7:443?encryption=none&security=tls&sni=congenial-telegram-4qpqqx9g49q25qrp-443.app.github.dev&fp=chrome&alpn=h2&insecure=1&allowInsecure=1&type=xhttp&host=congenial-telegram-4qpqqx9g49q25qrp-443.app.github.dev&path=%2F&mode=packet-up#G2rayXCodeLeafy|imannz-bit
+vless://f8788697-6e76-4a52-a721-b700b8702d38@20.90.66.7:443?encryption=none&security=tls&sni=studious-lamp-gxqv55p556593wqgx-443.app.github.dev&fp=chrome&alpn=h2&insecure=1&allowInsecure=1&type=xhttp&host=studious-lamp-gxqv55p556593wqgx-443.app.github.dev&path=%2F&mode=packet-up#G2rayXCodeLeafy|Okidorna15
