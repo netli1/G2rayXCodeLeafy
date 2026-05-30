@@ -9,16 +9,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TERM=xterm-256color \
     PYTHONUNBUFFERED=1
 
-# ---------------------------------------------------------------------------
-# System packages
-#   - python3            : the panel engine (g2leafy.py)
-#   - procps  (pgrep/pkill), psmisc (fuser)  : xray cleanup + port freeing
-#   - iproute2 (ss), net-tools               : connection / port checking
-#   - qrencode, jq, curl, wget, unzip        : QR + config + downloads
-#   - libcap2-bin (setcap)                   : let xray bind :443 as non-root
-#   - locales                                : proper UTF-8 box/line drawing
-#   - gh                                     : Codespace port visibility + keepalive
-# ---------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bash curl wget unzip ca-certificates sudo openssl uuid-runtime tmux tzdata \
         qrencode jq vnstat bc net-tools gnupg libcap2-bin iproute2 \
@@ -34,10 +24,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# ---------------------------------------------------------------------------
-# Xray-core (auto-detect arch: amd64 -> 64, arm64 -> arm64-v8a)
-# Grant CAP_NET_BIND_SERVICE so it can listen on :443 without root.
-# ---------------------------------------------------------------------------
 RUN set -eux; \
     case "$(dpkg --print-architecture)" in \
         amd64) XR="Xray-linux-64.zip" ;; \
