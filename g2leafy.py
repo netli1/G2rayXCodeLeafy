@@ -13,19 +13,18 @@ import subprocess
 import threading
 import urllib.request
 import urllib.parse
-import webbrowser
 import signal
 import ssl
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 
-LOCAL_VERSION = "4.0.0"
+LOCAL_VERSION = "3.0.1"
 AUTO_UPDATE = True
 UPSTREAM_REPO = "Code-Leafy/G2ray"
 RAW_BASE = f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/refs/heads/main/"
 
-DONATE_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxbTxcCS6sl7HpASqssmr6c9wYL1gsE86fBjFHTcRs0sl0o-R5ZAmKJk-z_GaBBRqcsHw/exec"
+DONATE_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxOXna3tBdo-K8aElSwnGfoCxCEAyF71NX0nC2c7qCg_KtEMbiGcHBUyEkpFYrWjCIOgw/exec"
 DONATE_SECRET = ""
 DONATE_IP = "20.120.56.11"
 DONATE_HEARTBEAT_SEC = 240
@@ -77,6 +76,9 @@ try:
 except Exception:
     CODESPACE_NAME = os.uname().nodename
 
+if CODESPACE_NAME and '\n' in CODESPACE_NAME:
+    CODESPACE_NAME = CODESPACE_NAME.split('\n')[-1].strip()
+
 PORT_DOMAIN = f"{CODESPACE_NAME}-{XRAY_PORT}.app.github.dev"
 WEB_DOMAIN = f"{CODESPACE_NAME}-{WEB_PORT}.app.github.dev"
 GITHUB_USER = os.environ.get("GITHUB_USER", CODESPACE_NAME.split('-')[0] if '-' in CODESPACE_NAME else "User")
@@ -118,6 +120,9 @@ SUB_HTML_TEMPLATE = r"""<!DOCTYPE html>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
         :root { --bg-base: #09090b; --bg-panel: #121214; --bg-hover: #1f1f22; --border: rgba(255,255,255,0.08); --border-hover: rgba(255,255,255,0.15); --text-main: #fafafa; --text-muted: #a1a1aa; --accent: #10b981; --accent-hover: #059669; --accent-bg: rgba(16,185,129,0.12); --danger: #ef4444; --warning: #f59e0b; --success: #10b981; --info: #3b82f6; --purple: #8b5cf6; --radius-md: 16px; --radius-sm: 10px; }
+        * { margin: 0; padding: 0; box-sizing: border-box; outline: none; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
+        ::selection { background: rgba(16, 185, 129, 0.3); color: #fff; }
+        input, textarea, select, .mono, pre, code, #log-output, td, .form-label, th, p { user-select: text !important; -webkit-user-select: text !important; }
         body { background: var(--bg-base); color: var(--text-main); font-family: 'Plus Jakarta Sans', sans-serif; margin: 0; padding: 24px 16px; display: flex; justify-content: center; min-height: 100vh; box-sizing: border-box; }
         .container { max-width: 480px; width: 100%; display: flex; flex-direction: column; gap: 20px; padding-bottom: 30px; }
         .card { background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 24px; box-shadow: 0 8px 30px rgba(0,0,0,0.4); }
@@ -272,12 +277,13 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             --radius-lg: 16px; --radius-md: 12px; --radius-sm: 8px; 
             --transition: all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
         }
-        * { margin: 0; padding: 0; box-sizing: border-box; outline: none; -webkit-tap-highlight-color: transparent; }
+        * { margin: 0; padding: 0; box-sizing: border-box; outline: none; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
         ::selection { background: rgba(16, 185, 129, 0.3); color: #fff; }
+        input, textarea, select, .mono, pre, code, #log-output, td, .form-label, th, p { user-select: text !important; -webkit-user-select: text !important; }
+        .btn, .nav-item, .custom-checkbox, .switch { user-select: none !important; -webkit-user-select: none !important; }
         
         body { background-color: var(--bg-base); color: var(--text-main); font-family: 'Plus Jakarta Sans', sans-serif; font-size: 14px; display: flex; height: 100vh; min-height: 100vh; width: 100vw; overflow: hidden; -webkit-font-smoothing: antialiased; }
         
-        input, textarea, select, .mono, pre, code, #log-output, td, .form-label { user-select: text; -webkit-user-select: text; }
         h1, h2, h3, h4, h5 { font-weight: 700; letter-spacing: -0.01em; color: var(--text-main); }
         .mono { font-family: 'JetBrains Mono', monospace; }
         
@@ -504,7 +510,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             <span style="font-size:1.8rem; font-weight:800; color:#fff;">G2ray<span style="color:var(--text-muted); font-weight:500;">Panel</span></span>
         </div>
         <div class="modal show" style="max-width: 420px; width: 100%; margin:0 20px; position:relative; transform:none; box-shadow:0 24px 60px rgba(0,0,0,0.8);">
-            <div class="modal-header" style="justify-content:center; padding:20px;"><div class="panel-title" style="font-size:1.1rem;"><i class="fa-solid fa-lock text-accent"></i> Authentication Required</div></div>
+            <div class="modal-header" style="justify-content:center; padding:20px;"><div class="panel-title" id="auth-title" style="font-size:1.1rem;"><i class="fa-solid fa-lock text-accent"></i> Authentication Required</div></div>
             <div class="modal-body" id="auth-body" style="padding:24px;"></div>
         </div>
     </div>
@@ -891,8 +897,46 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     <div class="toast-box" id="toaster"></div>
 
     <script>
-        const passSetup = true;
-        const loggedIn = true;
+        const passSetup = {{PASS_SETUP}};
+        const loggedIn = {{LOGGED_IN}};
+
+        if (!passSetup) {
+            document.getElementById('auth-overlay').style.display = 'flex';
+            document.getElementById('auth-title').innerHTML = '<i class="fa-solid fa-key text-accent"></i> Setup Password';
+            document.getElementById('auth-body').innerHTML = `
+                <p style="color:var(--text-muted); font-size:0.85rem; text-align:center; margin-bottom:20px;">Welcome to G2ray Panel. Please create a secure password to continue.</p>
+                <div class="form-group"><label class="form-label">New Password</label><input type="password" class="form-control" id="new-pass-input" placeholder="Enter password..."></div>
+                <div class="form-group" style="margin-top:8px;"><label class="form-label">Confirm Password</label><input type="password" class="form-control" id="confirm-pass-input" placeholder="Confirm password..." onkeydown="if(event.key==='Enter') window.setupPassword()"></div>
+                <button class="btn btn-primary" style="width:100%; margin-top:20px;" onclick="window.setupPassword()"><i class="fa-solid fa-arrow-right"></i> Save & Continue</button>
+                <div style="text-align:center; margin-top:20px; font-size:0.8rem; color:var(--text-muted);">
+                    <a href="https://github.com/Code-Leafy/G2ray" target="_blank" style="color:var(--text-main); text-decoration:none;"><i class="fa-brands fa-github"></i> G2ray Project</a>
+                </div>
+            `;
+        } else if (!loggedIn) {
+            document.getElementById('auth-overlay').style.display = 'flex';
+            document.getElementById('auth-title').innerHTML = '<i class="fa-solid fa-lock text-accent"></i> Authentication Required';
+            document.getElementById('auth-body').innerHTML = `
+                <div class="form-group"><label class="form-label">Password</label><input type="password" class="form-control" id="pass-input" placeholder="Enter password..." onkeydown="if(event.key==='Enter') window.doLogin()"></div>
+                <button class="btn btn-primary" style="width:100%; margin-top:20px;" onclick="window.doLogin()"><i class="fa-solid fa-arrow-right-to-bracket"></i> Login</button>
+                <div style="text-align:center; margin-top:20px; font-size:0.8rem; color:var(--text-muted);">
+                    <a href="https://github.com/Code-Leafy/G2ray" target="_blank" style="color:var(--text-main); text-decoration:none;"><i class="fa-brands fa-github"></i> G2ray Project</a>
+                </div>
+            `;
+        } else {
+            document.getElementById('auth-overlay').style.display = 'none';
+        }
+
+        window.setupPassword = function() {
+            const p1 = document.getElementById('new-pass-input').value;
+            const p2 = document.getElementById('confirm-pass-input').value;
+            if(!p1) return showToast('Password cannot be empty', 'error');
+            if(p1 !== p2) return showToast('Passwords do not match', 'error');
+            fetch('/api/setup', { method:'POST', body:JSON.stringify({pass: p1}) })
+                .then(r=>r.json()).then(d=>{
+                if(d.ok) { document.getElementById('loader').style.opacity = '1'; document.getElementById('loader').style.visibility = 'visible'; setTimeout(() => location.reload(), 300); } 
+                else { showToast('Setup failed', 'error'); }
+            }).catch(()=>showToast('Network error', 'error'));
+        };
 
         window.doLogin = function() {
             const p = document.getElementById('pass-input').value;
@@ -1525,6 +1569,8 @@ window.initBackendSync = async function() {
     
     async function syncLoop() {
         if(backendSync.syncing) return;
+        const authOverlay = document.getElementById('auth-overlay');
+        if (authOverlay && authOverlay.style.display !== 'none') return;
         try {
             let res = await fetch('/api/state');
             if(res.status === 401) return location.reload();
@@ -1787,7 +1833,11 @@ def commit_client_usage():
                     uuid_id = c.get("id")
                     if uuid_id in usage_diffs:
                         c["usage"] = c.get("usage", 0.0) + (usage_diffs[uuid_id] / 1073741824.0)
-            pstate["telemetry"] = {"total_down": d, "total_up": u, "uptime_sec": s}
+            if "telemetry" not in pstate:
+                pstate["telemetry"] = {}
+            pstate["telemetry"]["total_down"] = d
+            pstate["telemetry"]["total_up"] = u
+            pstate["telemetry"]["uptime_sec"] = s
             tmp = PANEL_STATE_FILE + ".tmp"
             with open(tmp, "w") as f: json.dump(pstate, f, indent=2)
             os.rename(tmp, PANEL_STATE_FILE)
@@ -1908,17 +1958,43 @@ def handle_api_action(data):
         try: open(XRAY_LOG, "w").close()
         except Exception: pass
 
+def get_auth_cookie(headers):
+    cookie_header = headers.get('Cookie')
+    if cookie_header:
+        for cookie in cookie_header.split(';'):
+            cookie = cookie.strip()
+            if cookie.startswith('auth='):
+                return urllib.parse.unquote(cookie[5:])
+    return ""
+
 class WebUIHandler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     
     def check_auth(self):
-        if not PANEL_PASSWORD: return True
+        if not PANEL_PASSWORD: return False
         return get_auth_cookie(self.headers) == PANEL_PASSWORD
-    
+
+    def send_json(self, status, payload):
+        try:
+            self.send_response(status)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(payload).encode('utf-8'))
+        except: pass
+
     def do_GET(self):
         try:
-            if self.path.startswith('/sub/'):
-                token = self.path.split('/')[-1]
+            parsed_path = urllib.parse.urlparse(self.path)
+            base_path = parsed_path.path
+            
+            if base_path.startswith('http://') or base_path.startswith('https://'):
+                base_path = urllib.parse.urlparse(self.path).path
+
+            if not base_path:
+                base_path = '/'
+            
+            if base_path.startswith('/sub/'):
+                token = base_path.split('/')[-1]
                 token += "=" * ((4 - len(token) % 4) % 4)
                 try:
                     client_id = base64.urlsafe_b64decode(token).decode("utf-8")
@@ -1977,54 +2053,54 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     self.wfile.write(b64_content.encode("utf-8"))
                 return
 
-            if self.path == '/':
+            if base_path == '/' or base_path == '/index.html':
                 self.send_response(200)
                 self.send_header("Content-type", "text/html; charset=utf-8")
                 self.end_headers()
                 html = HTML_CONTENT.replace("{{PASS_SETUP}}", "true" if PANEL_PASSWORD else "false")
                 html = html.replace("{{LOGGED_IN}}", "true" if self.check_auth() else "false")
-                self.wfile.write(html.encode())
+                self.wfile.write(html.encode('utf-8'))
                 return
                 
-            if self.path == '/panel-wiring.js':
+            if base_path == '/panel-wiring.js':
                 self.send_response(200)
                 self.send_header("Content-type", "application/javascript")
                 self.end_headers()
-                self.wfile.write(PANEL_WIRING_JS.encode())
+                self.wfile.write(PANEL_WIRING_JS.encode('utf-8'))
                 return
 
             if not self.check_auth():
-                self.send_response(401)
-                self.end_headers()
+                self.send_json(401, {"ok": False, "error": "Unauthorized"})
                 return
 
-            if self.path == '/api/state':
+            if base_path == '/api/state':
                 self.send_response(200)
                 self.send_header("Content-type", "application/json")
                 self.end_headers()
-                self.wfile.write(get_combined_state().encode())
-            elif self.path.startswith('/api/sub/link/'):
-                client_id = self.path.split('/')[-1]
+                self.wfile.write(get_combined_state().encode('utf-8'))
+            elif base_path.startswith('/api/sub/link/'):
+                client_id = base_path.split('/')[-1]
                 link = generate_sub_link_url(urllib.parse.unquote(client_id))
-                self.send_response(200)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"ok": True, "link": link}).encode())
+                self.send_json(200, {"ok": True, "link": link})
             else:
-                self.send_response(404)
-                self.end_headers()
-        except Exception: pass
+                self.send_json(404, {"ok": False, "error": "Not Found"})
+        except Exception as e: 
+            log_sys_err(f"GET exception: {e}")
+            self.send_json(500, {"ok": False, "error": str(e)})
         
     def do_PUT(self):
         try:
             if not self.check_auth():
-                self.send_response(401)
-                self.end_headers()
+                self.send_json(401, {"ok": False, "error": "Unauthorized"})
                 return
 
-            if self.path == '/api/state':
+            parsed = urllib.parse.urlparse(self.path)
+            base_path = parsed.path
+            if not base_path: base_path = '/'
+            
+            if base_path == '/api/state':
                 length = int(self.headers.get('Content-Length', 0))
-                body = self.rfile.read(length).decode()
+                body = self.rfile.read(length).decode('utf-8')
                 data = json.loads(body)
                 new_state = data.get("state", {})
                 
@@ -2032,40 +2108,57 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     try:
                         with open(PANEL_STATE_FILE, "r") as f: old_pstate = json.load(f)
                     except Exception: old_pstate = {}
+                    
                     old_usages = {c["id"]: c.get("usage", 0.0) for c in old_pstate.get("clients", [])}
                     with state_lock:
                         for cid, diff in state.get("client_usage_bytes", {}).items():
                             old_usages[cid] = old_usages.get(cid, 0.0) + (diff / 1073741824.0)
                         state["client_usage_bytes"] = {}
+                        
                     for c in new_state.get("clients", []):
                         if c["id"] in old_usages:
                             c["usage"] = old_usages[c["id"]]
-                    new_state["telemetry"] = old_pstate.get("telemetry", {"total_down": state["total_down"], "total_up": state["total_up"], "uptime_sec": state["uptime_sec"]})
+                            
+                    with state_lock:
+                        new_state["telemetry"] = old_pstate.get("telemetry", {
+                            "total_down": state.get("total_down", 0), 
+                            "total_up": state.get("total_up", 0), 
+                            "uptime_sec": state.get("uptime_sec", 0)
+                        })
+                    
+                    if "settings" not in new_state: new_state["settings"] = {}
+                    if old_pstate.get("settings", {}).get("panelPassword"):
+                        new_state["settings"]["panelPassword"] = old_pstate["settings"]["panelPassword"]
+
                     try:
                         tmp = PANEL_STATE_FILE + ".tmp"
                         with open(tmp, "w") as f: json.dump(new_state, f, indent=2)
                         os.rename(tmp, PANEL_STATE_FILE)
-                    except Exception: pass
+                    except Exception as fe:
+                        log_sys_err(f"File save error: {fe}")
                 
                 reason = data.get("reason", "")
                 if reason in ["saveClient", "deleteClient", "saveAdvancedRules", "import"]:
                     generate_xray_config()
                     threading.Thread(target=lambda: (stop_xray(), time.sleep(0.5), start_xray())).start()
 
-                self.send_response(200)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"ok": True}).encode())
+                self.send_json(200, {"ok": True})
             else:
-                self.send_response(404)
-                self.end_headers()
-        except Exception: pass
+                self.send_json(404, {"ok": False, "error": "Not Found"})
+        except Exception as e: 
+            log_sys_err(f"PUT exception: {e}")
+            self.send_json(500, {"ok": False, "error": str(e)})
         
     def do_POST(self):
+        global PANEL_PASSWORD
         try:
-            if self.path == '/api/login':
+            parsed = urllib.parse.urlparse(self.path)
+            base_path = parsed.path
+            if not base_path: base_path = '/'
+            
+            if base_path == '/api/login':
                 length = int(self.headers.get('Content-Length', 0))
-                data = json.loads(self.rfile.read(length).decode())
+                data = json.loads(self.rfile.read(length).decode('utf-8'))
                 if data.get("pass") == PANEL_PASSWORD:
                     self.send_response(200)
                     self.send_header('Set-Cookie', f'auth={urllib.parse.quote(PANEL_PASSWORD)}; Path=/; HttpOnly; Max-Age=31536000')
@@ -2073,54 +2166,68 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(b'{"ok":true}')
                 else:
-                    self.send_response(401)
+                    self.send_json(401, {"ok": False})
+                return
+                
+            if base_path == '/api/setup':
+                length = int(self.headers.get('Content-Length', 0))
+                data = json.loads(self.rfile.read(length).decode('utf-8'))
+                new_pass = data.get("pass", "")
+                if not PANEL_PASSWORD and new_pass:
+                    PANEL_PASSWORD = new_pass
+                    with file_lock:
+                        try:
+                            with open(PANEL_STATE_FILE, "r") as f: pstate = json.load(f)
+                        except Exception: pstate = {}
+                        if "settings" not in pstate: pstate["settings"] = {}
+                        pstate["settings"]["panelPassword"] = PANEL_PASSWORD
+                        tmp = PANEL_STATE_FILE + ".tmp"
+                        with open(tmp, "w") as f: json.dump(pstate, f, indent=2)
+                        os.rename(tmp, PANEL_STATE_FILE)
+                        
+                    self.send_response(200)
+                    self.send_header('Set-Cookie', f'auth={urllib.parse.quote(PANEL_PASSWORD)}; Path=/; HttpOnly; Max-Age=31536000')
                     self.send_header("Content-type", "application/json")
                     self.end_headers()
-                    self.wfile.write(b'{"ok":false}')
+                    self.wfile.write(b'{"ok":true}')
+                else:
+                    self.send_json(400, {"ok": False})
                 return
                 
             if not self.check_auth():
-                self.send_response(401)
-                self.end_headers()
+                self.send_json(401, {"ok": False, "error": "Unauthorized"})
                 return
 
-            if self.path == '/api/action':
+            if base_path == '/api/action':
                 length = int(self.headers.get('Content-Length', 0))
-                body = self.rfile.read(length).decode()
+                body = self.rfile.read(length).decode('utf-8')
                 data = json.loads(body)
                 handle_api_action(data)
-                self.send_response(200)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"ok":true}')
-            elif self.path == '/api/donate':
+                self.send_json(200, {"ok": True})
+            elif base_path == '/api/donate':
                 with state_lock: state["donate_active"] = True
                 threading.Thread(target=donate_heartbeat, daemon=True).start()
-                self.send_response(200)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"ok": True, "message": "Donated via API", "donated": True}).encode())
-            elif self.path == '/api/backup':
+                self.send_json(200, {"ok": True, "message": "Donated via API", "donated": True})
+            elif base_path == '/api/backup':
                 backup_name = f"panel_state_backup_{int(time.time())}.json"
                 if os.path.exists(PANEL_STATE_FILE):
                     with file_lock:
                         shutil.copyfile(PANEL_STATE_FILE, os.path.join(DATA_DIR, backup_name))
-                self.send_response(200)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"ok": True, "file": backup_name}).encode())
+                self.send_json(200, {"ok": True, "file": backup_name})
             else:
-                self.send_response(404)
-                self.end_headers()
-        except Exception:
-            try:
-                self.send_response(500)
-                self.end_headers()
-            except: pass
+                self.send_json(404, {"ok": False, "error": "Not Found"})
+        except Exception as e:
+            log_sys_err(f"POST exception: {e}")
+            self.send_json(500, {"ok": False, "error": str(e)})
 
 def web_server_thread(port):
-    try: ThreadedHTTPServer(('0.0.0.0', port), WebUIHandler).serve_forever()
-    except Exception: pass
+    while engine_running:
+        try: 
+            server = ThreadedHTTPServer(('0.0.0.0', port), WebUIHandler)
+            server.serve_forever()
+        except Exception as e: 
+            log_sys_err(f"Web server failed on port {port}: {e}")
+            time.sleep(2)
 
 async def multiplexer(reader, writer):
     try:
@@ -2466,9 +2573,6 @@ def print_start_banner():
     print(f"🔗 Forwarded Xray Port: \033[94m{PORT_DOMAIN}:{XRAY_PORT}\033[0m")
     print("="*60 + "\n")
 
-    try: webbrowser.open(panel_url)
-    except Exception: pass
-
 def handle_exit(signum, frame):
     global engine_running
     engine_running = False
@@ -2479,7 +2583,7 @@ def handle_exit(signum, frame):
     sys.exit(0)
 
 def main():
-    global engine_running
+    global engine_running, PANEL_PASSWORD
     
     signal.signal(signal.SIGTERM, handle_exit)
     signal.signal(signal.SIGINT, handle_exit)
@@ -2493,6 +2597,7 @@ def main():
                 json.dump({
                     "clients": [],
                     "settings": {
+                        "panelPassword": "",
                         "advanced": {"logLevel": "warning", "domainStrategy": "UseIP", "dnsPrimary": "1.1.1.1", "dnsFallback": "8.8.8.8"}
                     },
                     "telemetry": {"total_down": 0, "total_up": 0, "uptime_sec": 0}
@@ -2505,6 +2610,11 @@ def main():
         state["total_down"] = tel.get("total_down", 0)
         state["total_up"] = tel.get("total_up", 0)
         state["uptime_sec"] = tel.get("uptime_sec", 0)
+        
+        saved_pass = pstate.get("settings", {}).get("panelPassword", "")
+        if saved_pass and not PANEL_PASSWORD:
+            PANEL_PASSWORD = saved_pass
+
         if any("Community_Donate" in c.get("name", "") or "Code-Leafy🍃 |" in c.get("name", "") for c in pstate.get("clients", [])):
             state["donate_active"] = True
     except Exception: pass
@@ -2516,6 +2626,7 @@ def main():
     threading.Thread(target=xray_monitor_thread, daemon=True).start()
     threading.Thread(target=web_server_thread, args=(WEB_PORT,), daemon=True).start()
     
+    time.sleep(2)
     print_start_banner()
     
     try:
