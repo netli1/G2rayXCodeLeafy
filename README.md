@@ -4,7 +4,6 @@
 
 A sleek **web dashboard** for managing Xray VLESS xHTTP configs on GitHub Codespaces.
 
-[![Version](https://img.shields.io/badge/version-3.0.0-2DC94E?style=flat-square)](https://github.com/Code-Leafy/G2Leafy)
 [![License](https://img.shields.io/badge/license-MIT-2DC94E?style=flat-square)](https://github.com/Code-Leafy/G2Leafy)
 [![Status](https://img.shields.io/badge/status-stable-2DC94E?style=flat-square)](https://github.com/Code-Leafy/G2Leafy)
 
