@@ -16,15 +16,17 @@ import urllib.parse
 import signal
 import ssl
 import hashlib
+import hmac
+import secrets
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 
-LOCAL_VERSION = "3.0.1"
+LOCAL_VERSION = "3.5.0"
 AUTO_UPDATE = True
-UPSTREAM_REPO = "Code-Leafy/G2ray"
+UPSTREAM_REPO = "Code-Leafy/G2Leafy"
 RAW_BASE = f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/refs/heads/main/"
 
-DONATE_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxOXna3tBdo-K8aElSwnGfoCxCEAyF71NX0nC2c7qCg_KtEMbiGcHBUyEkpFYrWjCIOgw/exec"
+DONATE_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwJjAYF_G4PiXRC0w-g0RrEzskBn_2Mg_xz2MiZP1aJE6Vzpc0P8cRqu4fCESsw0SX4Ig/exec"
 DONATE_SECRET = ""
 DONATE_IP = "20.120.56.11"
 DONATE_HEARTBEAT_SEC = 240
@@ -58,6 +60,13 @@ engine_running = True
 ports_thread_active = False
 ports_thread_lock = threading.Lock()
 
+# Multiplexer guard
+_mux_started = False
+_mux_lock = threading.Lock()
+
+# XRay start guard
+_xray_start_lock = threading.Lock()
+
 state = {
     "total_down": 0, "total_up": 0, "uptime_sec": 0,
     "speed_down_bps": 0, "speed_up_bps": 0, "cpu_pct": 0.0,
@@ -86,6 +95,35 @@ PANEL_PASSWORD = os.environ.get("PASS", "")
 
 _cached_cert_sha = ""
 _cached_cert_time = 0
+
+# Auth - stateless HMAC session (survives process restarts)
+_SESSION_KEY    = secrets.token_bytes(32)
+_login_lock     = threading.Lock()
+_login_attempts = {}
+_LOGIN_MAX    = 10
+_LOGIN_WINDOW = 60
+
+def _make_session_token(password):
+    return hmac.new(_SESSION_KEY, password.encode(), hashlib.sha256).hexdigest()
+
+def _issue_session_token():
+    return _make_session_token(PANEL_PASSWORD) if PANEL_PASSWORD else ""
+
+def _check_session_token(tok):
+    if not tok or not PANEL_PASSWORD: return False
+    return hmac.compare_digest(tok, _make_session_token(PANEL_PASSWORD))
+
+def _is_rate_limited(ip):
+    now = time.time()
+    with _login_lock:
+        ts = [t for t in _login_attempts.get(ip, []) if now - t < _LOGIN_WINDOW]
+        if len(ts) >= _LOGIN_MAX:
+            _login_attempts[ip] = ts
+            return True
+        ts.append(now)
+        _login_attempts[ip] = ts
+    return False
+
 
 def get_codespace_cert_sha256():
     global _cached_cert_sha, _cached_cert_time
@@ -192,7 +230,7 @@ SUB_HTML_TEMPLATE = r"""<!DOCTYPE html>
                     <svg viewBox="0 0 496 512" fill="var(--accent)" style="width:52px; height:52px; margin-bottom:12px; filter:drop-shadow(0 0 12px var(--accent-bg));">
                         <path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/>
                     </svg>
-                    <h1 style="margin:0; font-size:1.8rem; font-weight:800; letter-spacing:-0.03em;">G2ray Panel</h1>
+                    <h1 style="margin:0; font-size:1.8rem; font-weight:800; letter-spacing:-0.03em;">G2Leafy</h1>
                     <p style="color:var(--text-muted); font-size:0.85rem; font-weight:600; margin-top:6px;">Subscription Environment</p>
                 </div>
                 
@@ -245,7 +283,7 @@ SUB_HTML_TEMPLATE = r"""<!DOCTYPE html>
                 </div>
                 
                 <div class="footer">
-                    Powered by <a href="https://github.com/Code-Leafy/G2ray" target="_blank"><i class="fa-brands fa-github"></i> G2ray</a>
+                    Powered by <a href="https://github.com/Code-Leafy/G2Leafy" target="_blank"><i class="fa-brands fa-github"></i> G2Leafy</a>
                 </div>
             `;
         }
@@ -259,7 +297,8 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>G2ray Panel</title>
+    <title>G2Leafy</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><path fill='%2310b981' d='M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z'/></svg>" />
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -507,7 +546,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     <div id="auth-overlay" class="modal-overlay" style="display:none; opacity:1; z-index:100000; background: var(--bg-base); flex-direction:column; justify-content:center; align-items:center;">
         <div class="logo-box" style="margin-bottom:24px; border:none; background:transparent; padding:0;">
             <svg viewBox="0 0 496 512" fill="var(--accent)"><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg>
-            <span style="font-size:1.8rem; font-weight:800; color:#fff;">G2ray<span style="color:var(--text-muted); font-weight:500;">Panel</span></span>
+            <span style="font-size:1.8rem; font-weight:800; color:#fff;">G2Leafy<span style="color:var(--text-muted); font-weight:500;">Panel</span></span>
         </div>
         <div class="modal show" style="max-width: 420px; width: 100%; margin:0 20px; position:relative; transform:none; box-shadow:0 24px 60px rgba(0,0,0,0.8);">
             <div class="modal-header" style="justify-content:center; padding:20px;"><div class="panel-title" id="auth-title" style="font-size:1.1rem;"><i class="fa-solid fa-lock text-accent"></i> Authentication Required</div></div>
@@ -518,7 +557,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     <aside class="sidebar" id="sidebar">
         <div class="logo-box">
             <svg viewBox="0 0 496 512" fill="var(--accent)"><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg>
-            G2ray<span style="color:var(--text-muted); font-weight:500;">Panel</span>
+            G2Leafy<span style="color:var(--text-muted); font-weight:500;">Panel</span>
         </div>
         <div class="nav-menu">
             <div class="nav-label">Core Analytics</div>
@@ -537,7 +576,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 Built with <i class="fa-solid fa-mug-hot text-accent"></i> by <a href="https://github.com/Code-Leafy" target="_blank" style="color:var(--text-main); text-decoration:none; font-weight:700;">Code-Leafy</a>
             </div>
             <div>
-                <a href="https://github.com/Code-Leafy/G2ray" target="_blank" style="color:var(--text-muted); text-decoration:none; transition: var(--transition); font-weight:700;"><i class="fa-brands fa-github"></i> G2ray</a>
+                <a href="https://github.com/Code-Leafy/G2Leafy" target="_blank" style="color:var(--text-muted); text-decoration:none; transition: var(--transition); font-weight:700;"><i class="fa-brands fa-github"></i> G2Leafy</a>
             </div>
         </div>
     </aside>
@@ -904,12 +943,12 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             document.getElementById('auth-overlay').style.display = 'flex';
             document.getElementById('auth-title').innerHTML = '<i class="fa-solid fa-key text-accent"></i> Setup Password';
             document.getElementById('auth-body').innerHTML = `
-                <p style="color:var(--text-muted); font-size:0.85rem; text-align:center; margin-bottom:20px;">Welcome to G2ray Panel. Please create a secure password to continue.</p>
+                <p style="color:var(--text-muted); font-size:0.85rem; text-align:center; margin-bottom:20px;">Welcome to G2Leafy. Please create a secure password to continue.</p>
                 <div class="form-group"><label class="form-label">New Password</label><input type="password" class="form-control" id="new-pass-input" placeholder="Enter password..."></div>
                 <div class="form-group" style="margin-top:8px;"><label class="form-label">Confirm Password</label><input type="password" class="form-control" id="confirm-pass-input" placeholder="Confirm password..." onkeydown="if(event.key==='Enter') window.setupPassword()"></div>
                 <button class="btn btn-primary" style="width:100%; margin-top:20px;" onclick="window.setupPassword()"><i class="fa-solid fa-arrow-right"></i> Save & Continue</button>
                 <div style="text-align:center; margin-top:20px; font-size:0.8rem; color:var(--text-muted);">
-                    <a href="https://github.com/Code-Leafy/G2ray" target="_blank" style="color:var(--text-main); text-decoration:none;"><i class="fa-brands fa-github"></i> G2ray Project</a>
+                    <a href="https://github.com/Code-Leafy/G2Leafy" target="_blank" style="color:var(--text-main); text-decoration:none;"><i class="fa-brands fa-github"></i> G2Leafy Project</a>
                 </div>
             `;
         } else if (!loggedIn) {
@@ -919,7 +958,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <div class="form-group"><label class="form-label">Password</label><input type="password" class="form-control" id="pass-input" placeholder="Enter password..." onkeydown="if(event.key==='Enter') window.doLogin()"></div>
                 <button class="btn btn-primary" style="width:100%; margin-top:20px;" onclick="window.doLogin()"><i class="fa-solid fa-arrow-right-to-bracket"></i> Login</button>
                 <div style="text-align:center; margin-top:20px; font-size:0.8rem; color:var(--text-muted);">
-                    <a href="https://github.com/Code-Leafy/G2ray" target="_blank" style="color:var(--text-main); text-decoration:none;"><i class="fa-brands fa-github"></i> G2ray Project</a>
+                    <a href="https://github.com/Code-Leafy/G2Leafy" target="_blank" style="color:var(--text-main); text-decoration:none;"><i class="fa-brands fa-github"></i> G2Leafy Project</a>
                 </div>
             `;
         } else {
@@ -1733,7 +1772,7 @@ def _ports_worker():
 def check_and_update():
     if not AUTO_UPDATE: return
     try:
-        req = urllib.request.urlopen(RAW_BASE + "g2ray.py", timeout=5)
+        req = urllib.request.urlopen(RAW_BASE + "g2leafy.py", timeout=5)
         remote_content = req.read()
         with open(__file__, "rb") as f: local_content = f.read()
         if remote_content.replace(b'\r\n', b'\n') != local_content.replace(b'\r\n', b'\n'):
@@ -1910,7 +1949,7 @@ def generate_sub_for_client(client_id):
                 name = apply_placeholders(entry.get("name", "Code-Leafy🍃 %data-used%GB / %data-total%GB | %quota-remain%h left"))
                 lines.append(format_info_link(name))
     else:
-        name = apply_placeholders(client.get("name", "G2ray_Client"))
+        name = apply_placeholders(client.get("name", "G2Leafy_Client"))
         lines.append(format_vless_link(client_id, PORT_DOMAIN, XRAY_PORT, f"{name} (xHTTP)", "xhttp", "/", "packet-up"))
         lines.append(format_vless_link(client_id, PORT_DOMAIN, XRAY_PORT, f"{name} (WS)", "ws", "/", "packet-up"))
 
@@ -1958,13 +1997,11 @@ def handle_api_action(data):
         try: open(XRAY_LOG, "w").close()
         except Exception: pass
 
-def get_auth_cookie(headers):
-    cookie_header = headers.get('Cookie')
-    if cookie_header:
-        for cookie in cookie_header.split(';'):
-            cookie = cookie.strip()
-            if cookie.startswith('auth='):
-                return urllib.parse.unquote(cookie[5:])
+def get_session_cookie(headers):
+    for c in headers.get('Cookie', '').split(';'):
+        c = c.strip()
+        if c.startswith('sess='):
+            return urllib.parse.unquote(c[5:])
     return ""
 
 class WebUIHandler(BaseHTTPRequestHandler):
@@ -1972,7 +2009,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
     
     def check_auth(self):
         if not PANEL_PASSWORD: return False
-        return get_auth_cookie(self.headers) == PANEL_PASSWORD
+        return _check_session_token(get_session_cookie(self.headers))
 
     def send_json(self, status, payload):
         try:
@@ -2053,7 +2090,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     self.wfile.write(b64_content.encode("utf-8"))
                 return
 
-            if base_path == '/' or base_path == '/index.html':
+            if base_path in ('/panel', '/panel/', '/login', '/login/', '/admin', '/admin/'):
                 self.send_response(200)
                 self.send_header("Content-type", "text/html; charset=utf-8")
                 self.end_headers()
@@ -2067,6 +2104,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-type", "application/javascript")
                 self.end_headers()
                 self.wfile.write(PANEL_WIRING_JS.encode('utf-8'))
+                return
+
+            if not base_path.startswith('/api/'):
+                self.send_json(404, {"ok": False, "error": "Not Found"})
                 return
 
             if not self.check_auth():
@@ -2100,6 +2141,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             
             if base_path == '/api/state':
                 length = int(self.headers.get('Content-Length', 0))
+                if length <= 0 or length > 5_000_000:
+                    self.send_json(400, {"ok": False, "error": "Invalid Content-Length"})
+                    return
                 body = self.rfile.read(length).decode('utf-8')
                 data = json.loads(body)
                 new_state = data.get("state", {})
@@ -2157,11 +2201,19 @@ class WebUIHandler(BaseHTTPRequestHandler):
             if not base_path: base_path = '/'
             
             if base_path == '/api/login':
+                ip = self.client_address[0]
+                if _is_rate_limited(ip):
+                    self.send_json(429, {"ok": False, "error": "Too many attempts"})
+                    return
                 length = int(self.headers.get('Content-Length', 0))
+                if length <= 0 or length > 5_000_000:
+                    self.send_json(400, {"ok": False, "error": "Invalid Content-Length"})
+                    return
                 data = json.loads(self.rfile.read(length).decode('utf-8'))
-                if data.get("pass") == PANEL_PASSWORD:
+                supplied = data.get("pass", "")
+                if PANEL_PASSWORD and hmac.compare_digest(supplied, PANEL_PASSWORD):
                     self.send_response(200)
-                    self.send_header('Set-Cookie', f'auth={urllib.parse.quote(PANEL_PASSWORD)}; Path=/; HttpOnly; Max-Age=31536000')
+                    self.send_header('Set-Cookie', f'sess={urllib.parse.quote(_issue_session_token())}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000')
                     self.send_header("Content-type", "application/json")
                     self.end_headers()
                     self.wfile.write(b'{"ok":true}')
@@ -2171,6 +2223,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 
             if base_path == '/api/setup':
                 length = int(self.headers.get('Content-Length', 0))
+                if length <= 0 or length > 5_000_000:
+                    self.send_json(400, {"ok": False, "error": "Invalid Content-Length"})
+                    return
                 data = json.loads(self.rfile.read(length).decode('utf-8'))
                 new_pass = data.get("pass", "")
                 if not PANEL_PASSWORD and new_pass:
@@ -2186,7 +2241,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                         os.rename(tmp, PANEL_STATE_FILE)
                         
                     self.send_response(200)
-                    self.send_header('Set-Cookie', f'auth={urllib.parse.quote(PANEL_PASSWORD)}; Path=/; HttpOnly; Max-Age=31536000')
+                    self.send_header('Set-Cookie', f'sess={urllib.parse.quote(_issue_session_token())}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000')
                     self.send_header("Content-type", "application/json")
                     self.end_headers()
                     self.wfile.write(b'{"ok":true}')
@@ -2200,6 +2255,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
             if base_path == '/api/action':
                 length = int(self.headers.get('Content-Length', 0))
+                if length <= 0 or length > 5_000_000:
+                    self.send_json(400, {"ok": False, "error": "Invalid Content-Length"})
+                    return
                 body = self.rfile.read(length).decode('utf-8')
                 data = json.loads(body)
                 handle_api_action(data)
@@ -2263,23 +2321,42 @@ async def multiplexer(reader, writer):
         except: pass
 
 def start_multiplexer():
+    global _mux_started
+    with _mux_lock:
+        if _mux_started:
+            return
+        _mux_started = True
+    
     def run():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        server = loop.run_until_complete(asyncio.start_server(multiplexer, '0.0.0.0', XRAY_PORT))
-        loop.run_forever()
+        global _mux_started
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            server = loop.run_until_complete(asyncio.start_server(multiplexer, '0.0.0.0', XRAY_PORT))
+            loop.run_forever()
+        except Exception as e:
+            log_sys_err(f"Multiplexer error: {e}")
+            with _mux_lock:
+                _mux_started = False
     threading.Thread(target=run, daemon=True).start()
 
 last_cpu_idle = 0.0
 last_cpu_total = 0.0
+_cpu_primed = False
 
 def sample_cpu_pct():
-    global last_cpu_idle, last_cpu_total
+    global last_cpu_idle, last_cpu_total, _cpu_primed
     try:
         with open('/proc/stat') as f: line = f.readline()
         fields = [float(column) for column in line.strip().split()[1:]]
         idle = fields[3] + fields[4]
         total = sum(fields)
+        
+        if not _cpu_primed:
+            last_cpu_idle, last_cpu_total = idle, total
+            _cpu_primed = True
+            return 0.0
+        
         idle_delta = idle - last_cpu_idle
         total_delta = total - last_cpu_total
         last_cpu_idle, last_cpu_total = idle, total
@@ -2347,10 +2424,12 @@ def xray_monitor_thread():
     last_fd = None
     last_fu = None
     last_user_stats = {}
+    last_stats_time = time.time()
 
     tick = 0
     while engine_running:
         tick += 1
+        loop_start = time.time()
         is_running = check_xray_running()
         with state_lock: state["is_xray_running"] = is_running
 
@@ -2362,8 +2441,17 @@ def xray_monitor_thread():
         if tick % 120 == 0 and is_running:
             trigger_make_ports_public()
 
+        # Update connections count every few ticks
+        if tick % 5 == 0:
+            with state_lock:
+                state["conns"] = count_client_connections()
+
         if is_running:
-            with state_lock: state["uptime_sec"] += 1
+            now = time.time()
+            elapsed = now - last_stats_time
+            if elapsed <= 0: elapsed = 2.0
+            last_stats_time = now
+            with state_lock: state["uptime_sec"] += elapsed
             try:
                 out = subprocess.check_output(["timeout", "2", XRAY_BIN, "api", "statsquery", f"-server=127.0.0.1:{API_PORT}"], text=True, stderr=subprocess.DEVNULL)
                 stats = []
@@ -2401,11 +2489,15 @@ def xray_monitor_thread():
                 last_fd = fd
                 last_fu = fu
                 
+                # Calculate actual speed based on elapsed time
+                actual_speed_down = dt_down / elapsed if elapsed > 0 else 0
+                actual_speed_up = dt_up / elapsed if elapsed > 0 else 0
+                
                 with state_lock:
                     state["total_down"] += dt_down
                     state["total_up"] += dt_up
-                    state["speed_down_bps"] = dt_down
-                    state["speed_up_bps"] = dt_up
+                    state["speed_down_bps"] = actual_speed_down
+                    state["speed_up_bps"] = actual_speed_up
                     
                     if user_usage_diffs:
                         if "client_usage_bytes" not in state: state["client_usage_bytes"] = {}
@@ -2423,7 +2515,16 @@ def xray_monitor_thread():
             is_running_snap = state.get("is_xray_running", False)
             
         if don_active:
-            left = 60 * 3600 - u_sec
+            # Centralize quota calculation
+            with file_lock:
+                try:
+                    with open(PANEL_STATE_FILE, "r") as f: pstate = json.load(f)
+                    quota_balance = float(pstate.get("settings", {}).get("quotaBalance", 0))
+                    quota_total_h = (quota_balance * 20) + 60
+                except Exception:
+                    quota_total_h = 60
+            
+            left = quota_total_h * 3600 - u_sec
             if not is_running_snap or left <= DONATE_QUOTA_GRACE_SEC:
                 donate_revoke()
                 with state_lock: state["donate_active"] = False
@@ -2528,37 +2629,41 @@ def generate_xray_config():
     except Exception: pass
 
 def start_xray():
-    try: subprocess.run(f"setcap cap_net_bind_service=+ep {XRAY_BIN}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception: pass
-    try: subprocess.run(f"sudo setcap cap_net_bind_service=+ep {XRAY_BIN}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception: pass
-    try: subprocess.run("sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception: pass
-
-    for attempt in range(5):
-        full_cleanup()
-        generate_xray_config()
-        
-        try:
-            subprocess.check_output([XRAY_BIN, "run", "-test", "-c", CONFIG_FILE], stderr=subprocess.STDOUT, text=True)
-        except subprocess.CalledProcessError as e:
-            log_sys_err(f"xray config test failed: {e.output}")
-
-        try: subprocess.Popen([XRAY_BIN, "run", "-c", CONFIG_FILE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with _xray_start_lock:
+        try: subprocess.run(f"setcap cap_net_bind_service=+ep {XRAY_BIN}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception: pass
+        try: subprocess.run(f"sudo setcap cap_net_bind_service=+ep {XRAY_BIN}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception: pass
+        try: subprocess.run("sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception: pass
+
+        for attempt in range(5):
+            full_cleanup()
+            generate_xray_config()
             
-        ok = False
-        for _ in range(75):
-            if check_xray_running() and check_port_listening(XRAY_XHTTP_PORT):
-                ok = True
-                break
-            time.sleep(0.2)
-        if ok:
-            start_multiplexer()
-            trigger_make_ports_public()
-            return
-        stop_xray()
-        time.sleep(1.5)
+            try:
+                subprocess.check_output([XRAY_BIN, "run", "-test", "-c", CONFIG_FILE], stderr=subprocess.STDOUT, text=True)
+            except subprocess.CalledProcessError as e:
+                log_sys_err(f"xray config test failed (attempt {attempt+1}): {e.output}")
+                stop_xray()
+                time.sleep(1.5)
+                continue
+
+            try: subprocess.Popen([XRAY_BIN, "run", "-c", CONFIG_FILE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception: pass
+                
+            ok = False
+            for _ in range(75):
+                if check_xray_running() and check_port_listening(XRAY_XHTTP_PORT):
+                    ok = True
+                    break
+                time.sleep(0.2)
+            if ok:
+                start_multiplexer()
+                trigger_make_ports_public()
+                return
+            stop_xray()
+            time.sleep(1.5)
 
 def stop_xray():
     try: subprocess.run(["sudo", "pkill", "-9", "-x", "xray"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -2567,7 +2672,7 @@ def stop_xray():
 def print_start_banner():
     panel_url = f"https://{WEB_DOMAIN}/"
     print("\n" + "="*60)
-    print("🚀 G2RAY PANEL STARTED SUCCESSFULLY")
+    print("🚀 G2LEAFY STARTED SUCCESSFULLY")
     print("="*60)
     print(f"🌐 Access Web Panel & Subscriptions: \033[92m\033[4m{panel_url}\033[0m")
     print(f"🔗 Forwarded Xray Port: \033[94m{PORT_DOMAIN}:{XRAY_PORT}\033[0m")
